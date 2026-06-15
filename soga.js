@@ -11,11 +11,11 @@ gsap.registerPlugin(ScrollTrigger);
 // data-segments      → partículas de física (default 100, rango 60-160)
 // data-smooth        → subdivisiones visuales entre partículas (default 3, rango 1-5)
 // data-tube-sides    → lados del tubo circular (default 16, rango 8-24)
-// data-iterations    → iteraciones de constraints (default 25; más = menos elástica, más soga real; rango 20-80)
+// data-iterations    → iteraciones de constraints (default 60; más = menos elástica, más soga real; rango 20-80)
 const _w = document.querySelector('.soga-sticky-wrapper');
 const cfg = {
-  gravity:      parseFloat(_w?.dataset?.gravity)      || 0.003,
-  damping:      parseFloat(_w?.dataset?.damping)      || 0.985,
+  gravity:      parseFloat(_w?.dataset?.gravity)      || 0.005,
+  damping:      parseFloat(_w?.dataset?.damping)      || 0.88,
   mouseForce:   parseFloat(_w?.dataset?.mouseForce)   || 0.12,
   tubeRadius:   parseFloat(_w?.dataset?.tubeRadius)   || 0.055,
   ropePosition: parseFloat(_w?.dataset?.ropePosition) || 72,
@@ -23,7 +23,7 @@ const cfg = {
   segments:     parseInt(_w?.dataset?.segments, 10)    || 100,
   smooth:       parseInt(_w?.dataset?.smooth, 10)      || 3,
   tubeSides:    parseInt(_w?.dataset?.tubeSides, 10)   || 16,
-  iterations:   parseInt(_w?.dataset?.iterations, 10)  || 25,
+  iterations:   parseInt(_w?.dataset?.iterations, 10)  || 80,
 };
 
 const NUM_SEGMENTS = Math.max(40, Math.min(200, cfg.segments));
@@ -230,13 +230,25 @@ function simulate() {
       if (!b.pinned) { b.x -= ox; b.y -= oy; }
     }
     particles[0].x = ROPE_X; particles[0].y = ropeTop;
-    // Mantener partícula agarrada pegada al mouse
+    // Mover partícula agarrada, clampeada al alcance máximo desde el ancla
     if (grabbedParticle) {
-      // Mover partícula conservando el offset del punto de agarre
-      grabbedParticle.x    = mouse3D.x + grabOffset.x;
-      grabbedParticle.y    = mouse3D.y + grabOffset.y;
-      grabbedParticle.oldX = mouse3D.x + grabOffset.x;
-      grabbedParticle.oldY = mouse3D.y + grabOffset.y;
+      const pIdx = particles.indexOf(grabbedParticle);
+      const maxReach = pIdx * segLen;
+      const tx = mouse3D.x + grabOffset.x;
+      const ty = mouse3D.y + grabOffset.y;
+      const rdx = tx - ROPE_X;
+      const rdy = ty - ropeTop;
+      const rdist = Math.sqrt(rdx * rdx + rdy * rdy);
+      if (rdist <= maxReach) {
+        grabbedParticle.x = tx;
+        grabbedParticle.y = ty;
+      } else {
+        const s = maxReach / rdist;
+        grabbedParticle.x = ROPE_X + rdx * s;
+        grabbedParticle.y = ropeTop + rdy * s;
+      }
+      grabbedParticle.oldX = grabbedParticle.x;
+      grabbedParticle.oldY = grabbedParticle.y;
     }
   }
 }
