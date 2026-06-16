@@ -12,6 +12,7 @@ gsap.registerPlugin(ScrollTrigger);
 // data-smooth        → subdivisiones visuales entre partículas (default 3, rango 1-5)
 // data-tube-sides    → lados del tubo circular (default 16, rango 8-24)
 // data-iterations    → iteraciones de constraints (default 60; más = menos elástica, más soga real; rango 20-80)
+// data-bend-stiffness → rigidez angular, 0-1 (default 0.82; más alto = menos se dobla, sin loops; rango 0.5-0.97)
 const _w = document.querySelector('.soga-sticky-wrapper');
 const cfg = {
   gravity:      parseFloat(_w?.dataset?.gravity)      || 0.005,
@@ -24,12 +25,14 @@ const cfg = {
   smooth:       parseInt(_w?.dataset?.smooth, 10)      || 3,
   tubeSides:    parseInt(_w?.dataset?.tubeSides, 10)   || 16,
   iterations:   parseInt(_w?.dataset?.iterations, 10)  || 80,
+  bendStiffness: parseFloat(_w?.dataset?.bendStiffness) || 0.82,
 };
 
 const NUM_SEGMENTS = Math.max(40, Math.min(200, cfg.segments));
 const GRAVITY      = cfg.gravity;
 const DAMPING      = cfg.damping;
 const ITERATIONS   = Math.max(10, Math.min(80, cfg.iterations));
+const BEND_FACTOR  = Math.max(0.5, Math.min(0.97, cfg.bendStiffness));
 const TUBE_SEGS    = Math.max(8, Math.min(32, cfg.tubeSides));
 const TUBE_R       = cfg.tubeRadius;
 const RENDER_SUBDIV = Math.max(1, Math.min(6, cfg.smooth));
@@ -62,7 +65,7 @@ function screenToWorld(ex, ey) {
   const ny   = -(ey / H) * 2 + 1;
   const halfH = Math.tan(fov / 2) * camera.position.z;
   const halfW = halfH * (W / H);
-  return { x: nx * halfW, y: ny * halfH };
+  return { x: nx * halfW, y: camera.position.y + ny * halfH };
 }
 
 // ---- Grab / drag interaction ----
@@ -96,6 +99,7 @@ window.addEventListener('mousedown', (e) => {
 window.addEventListener('mouseup', () => {
   if (grabbedParticle) {
     grabbedParticle = null;
+    grabbedIndex = null;
     document.body.style.cursor = isMouseOnRope() ? 'grab' : '';
   }
 });
@@ -104,6 +108,7 @@ window.addEventListener('mouseleave', () => {
   mouse3D.set(-9999, 0, 0);
   mouse2D.x = -9999; mouse2D.y = -9999;
   grabbedParticle = null;
+  grabbedIndex = null;
   document.body.style.cursor = '';
 });
 
@@ -123,6 +128,7 @@ window.addEventListener('touchstart', (e) => {
 
 window.addEventListener('touchend', () => {
   grabbedParticle = null;
+  grabbedIndex = null;
   mouse3D.set(-9999, 0, 0);
 });
 
@@ -196,17 +202,24 @@ function isMouseOnRope() {
 // ---- Simulate ----
 // ---- Grab state ----
 let grabbedParticle = null;
+let grabbedIndex = null;
 let grabOffset = { x: 0, y: 0 };
 
 function getClosestParticle() {
-  let minDist = Infinity, closest = null;
+  let minDist = Infinity, closest = null, closestIdx = null;
   for (let i = 1; i < particles.length; i++) {
-    const dx = particles[i].x - mouse3D.x;
-    const dy = particles[i].y - mouse3D.y;
-    const d  = dx*dx + dy*dy;
-    if (d < minDist) { minDist = d; closest = particles[i]; }
+    const { sx, sy } = worldToScreenXY(particles[i].x, particles[i].y);
+    const dx = sx - mouse2D.x;
+    const dy = sy - mouse2D.y;
+    const d  = dx * dx + dy * dy;
+    if (d < minDist) { minDist = d; closest = particles[i]; closestIdx = i; }
   }
-  return Math.sqrt(minDist) < TUBE_R * 8 ? closest : null;
+  if (Math.sqrt(minDist) < 60) {
+    grabbedIndex = closestIdx;
+    return closest;
+  }
+  grabbedIndex = null;
+  return null;
 }
 
 function simulate() {
@@ -219,6 +232,30 @@ function simulate() {
     p.y += vy - GRAVITY;
   }
 
+  // Fijar la partícula agarrada como ancla temporal durante el loop, en la
+  // posición del mouse clampeada al alcance máximo de soga disponible desde
+  // el ancla superior (evita estiramiento sin límite).
+  function pinGrabbedToMouse() {
+    const tx = mouse3D.x + grabOffset.x;
+    const ty = mouse3D.y + grabOffset.y;
+    const maxReach = grabbedIndex * segLen;
+    const rdx = tx - ROPE_X;
+    const rdy = ty - ropeTop;
+    const rdist = Math.sqrt(rdx * rdx + rdy * rdy) || 0.0001;
+    if (rdist <= maxReach) {
+      grabbedParticle.x = tx;
+      grabbedParticle.y = ty;
+    } else {
+      const s = maxReach / rdist;
+      grabbedParticle.x = ROPE_X + rdx * s;
+      grabbedParticle.y = ropeTop + rdy * s;
+    }
+  }
+
+  if (grabbedParticle) pinGrabbedToMouse();
+
+  const minBendDist = segLen * 2 * BEND_FACTOR;
+
   for (let iter = 0; iter < ITERATIONS; iter++) {
     for (let i = 0; i < NUM_SEGMENTS; i++) {
       const a = particles[i], b = particles[i+1];
@@ -226,30 +263,32 @@ function simulate() {
       const dist = Math.sqrt(dx*dx + dy*dy) || 0.0001;
       const diff = (dist - segLen) / dist * 0.5;
       const ox = dx * diff, oy = dy * diff;
-      if (!a.pinned) { a.x += ox; a.y += oy; }
-      if (!b.pinned) { b.x -= ox; b.y -= oy; }
+      const aPinned = a.pinned || a === grabbedParticle;
+      const bPinned = b.pinned || b === grabbedParticle;
+      if (!aPinned) { a.x += ox; a.y += oy; }
+      if (!bPinned) { b.x -= ox; b.y -= oy; }
+    }
+    // Rigidez angular: evita que la soga se doble en loops cerrados
+    // limitando cuánto pueden acercarse partículas separadas por 2.
+    for (let i = 0; i < NUM_SEGMENTS - 1; i++) {
+      const a = particles[i], b = particles[i+2];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx*dx + dy*dy) || 0.0001;
+      if (dist >= minBendDist) continue;
+      const diff = (minBendDist - dist) / dist * 0.5;
+      const ox = dx * diff, oy = dy * diff;
+      const aPinned = a.pinned || a === grabbedParticle;
+      const bPinned = b.pinned || b === grabbedParticle;
+      if (!aPinned) { a.x -= ox; a.y -= oy; }
+      if (!bPinned) { b.x += ox; b.y += oy; }
     }
     particles[0].x = ROPE_X; particles[0].y = ropeTop;
-    // Mover partícula agarrada, clampeada al alcance máximo desde el ancla
-    if (grabbedParticle) {
-      const pIdx = particles.indexOf(grabbedParticle);
-      const maxReach = pIdx * segLen * 0.82;
-      const tx = mouse3D.x + grabOffset.x;
-      const ty = mouse3D.y + grabOffset.y;
-      const rdx = tx - ROPE_X;
-      const rdy = ty - ropeTop;
-      const rdist = Math.sqrt(rdx * rdx + rdy * rdy);
-      if (rdist <= maxReach) {
-        grabbedParticle.x = tx;
-        grabbedParticle.y = ty;
-      } else {
-        const s = maxReach / rdist;
-        grabbedParticle.x = ROPE_X + rdx * s;
-        grabbedParticle.y = ropeTop + rdy * s;
-      }
-      grabbedParticle.oldX = grabbedParticle.x;
-      grabbedParticle.oldY = grabbedParticle.y;
-    }
+    if (grabbedParticle) pinGrabbedToMouse();
+  }
+
+  if (grabbedParticle) {
+    grabbedParticle.oldX = grabbedParticle.x;
+    grabbedParticle.oldY = grabbedParticle.y;
   }
 }
 
@@ -414,6 +453,7 @@ function bindCardGrab(el, idx) {
   el.addEventListener('mousedown', (e) => {
     const p = particles[CARD_INDICES[idx]];
     grabbedParticle = p;
+    grabbedIndex = CARD_INDICES[idx];
     grabOffset.x = p.x - mouse3D.x;
     grabOffset.y = p.y - mouse3D.y;
     document.body.style.cursor = 'grabbing';
@@ -426,6 +466,7 @@ function bindCardGrab(el, idx) {
     mouse3D.set(w.x, w.y, 0);
     const p = particles[CARD_INDICES[idx]];
     grabbedParticle = p;
+    grabbedIndex = CARD_INDICES[idx];
     grabOffset.x = p.x - mouse3D.x;
     grabOffset.y = p.y - mouse3D.y;
     e.preventDefault();
